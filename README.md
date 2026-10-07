@@ -129,6 +129,25 @@ dump yields no usable credentials.
 
 ---
 
+## Load test
+
+[`loadtest/k6.js`](loadtest/k6.js) is a [k6](https://k6.io) script. It sends 50% writes and
+50% reads. The rate steps up from 50 to 1,600 requests per second, with 2 minutes per step.
+The test stops when p95 latency is above 1 second or errors are above 1%. The last step that
+passed is the capacity.
+
+1. Mint a key with a high limit: `kv:client:create "load-testing" --limit=600000`.
+2. Run the script from a machine other than the server:
+
+```bash
+K6_KEY=<load-testing api key> k6 run loadtest/k6.js
+```
+
+A test against production writes keys that start with `loadtest:`. The store is
+append-only, so delete those rows and the client after the test.
+
+---
+
 ## Design notes
 
 The full reasoning lives in [`plans/01-application.md`](plans/01-application.md)
