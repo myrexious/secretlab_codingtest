@@ -92,9 +92,11 @@ jobs:
         if: ${{ env.CODECOV_TOKEN != '' }}
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
+          # A Codecov outage must not redden a build whose tests all passed.
           fail_ci_if_error: false
 
   deploy:
