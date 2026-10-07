@@ -261,12 +261,9 @@ components:
       name: cursor
       in: query
       required: false
-      description: |
-        Pass the `next_cursor` from the previous page, unchanged. Cursors are
-        opaque; do not build one by hand.
-
-        Cursor paging rather than offset paging, so a page stays correct even
-        while new writes land mid-scan.
+      description: >
+        Paste the `next_cursor` from the previous response. Omit it for the
+        first page. A `next_cursor` of `null` means there are no more pages.
       schema: { type: string }
 
   schemas:
