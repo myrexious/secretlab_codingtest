@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+
+    services:
+      # Tests run against real PostgreSQL, never SQLite. SQLite has no
+      # clock_timestamp() and different json semantics, so a SQLite suite would
+      # pass while production breaks.
+      #
+      # This is CI's own throwaway database. Nothing here touches the VPS.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: kvstore_test
+          POSTGRES_USER: kvstore
+          POSTGRES_PASSWORD: kvstore
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_pgsql, redis, zip
+          # pcov, not xdebug: roughly 10x faster for a coverage-only run, and
+          # this runs on every push.
+          coverage: pcov
+
+      - name: Cache Composer packages
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: composer-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Prepare the environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+
+      - name: Check code style
+        run: ./vendor/bin/pint --test
+
+      - name: Run tests with coverage
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5432
+          DB_DATABASE: kvstore_test
+          DB_USERNAME: kvstore
+          DB_PASSWORD: kvstore
+          REDIS_HOST: 127.0.0.1
+          # The CI Redis has no password. Laravel converts the string "null"
+          # into a real null, which is what the client needs.
+          REDIS_PASSWORD: 'null'
+        run: ./vendor/bin/pest --coverage --min=90 --coverage-clover=coverage.xml
+
+      - name: Upload coverage to Codecov
+        # Skipped automatically until CODECOV_TOKEN is added to the repository
+        # secrets, so a missing token cannot turn the build red.
+        if: ${{ env.CODECOV_TOKEN != '' }}
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+
+  deploy:
+    name: Build and deploy
+    needs: test
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: prod
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image that passed the tests above is the image that deploys. The
+      # VPS never rebuilds, so it cannot drift from what was tested.
+      - name: Deploy to the VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          # The key carries a forced command in authorized_keys, so the VPS runs
+          # /srv/kv/deploy.sh no matter what is sent here. A stolen key cannot
+          # open a shell.
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "$VPS_USER@$VPS_HOST" true
+
+      - name: Smoke test the deployment
+        run: |
+          curl --fail --silent --show-error \
+               --retry 12 --retry-delay 5 --retry-all-errors \
+               https://secretlab.kreio.tech/health

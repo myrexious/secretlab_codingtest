@@ -1,0 +1,94 @@
+# Production stack. Runs on the VPS.
+#
+# PostgreSQL is NOT here. It runs natively on the host, reached through the
+# host.docker.internal alias below.
+#
+# For local work use compose.dev.yml instead:
+#   docker compose -f compose.dev.yml up
+name: secretlab-kv
+
+services:
+  app:
+    image: ghcr.io/myrexious/secretlab_codingtest:latest
+    restart: unless-stopped
+    env_file: .env
+
+    # PostgreSQL runs natively on the host, outside Docker. The container's own
+    # localhost is its own loopback, so it needs this alias to cross the
+    # boundary. The host also needs listen_addresses and a pg_hba rule.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # No "ports:" key, deliberately. Traefik reaches the container directly over
+    # the traefik-public network. A published port would write iptables rules
+    # that sit before the ufw chain, so Docker would bypass the firewall.
+    networks:
+      - traefik-public
+      - internal
+
+    depends_on:
+      redis:
+        condition: service_healthy
+
+    labels:
+      # Traefik runs natively on the host and watches the Docker socket.
+      # exposedByDefault is false, so traefik.enable is mandatory.
+      traefik.enable: "true"
+      traefik.docker.network: "traefik-public"
+      traefik.http.routers.kv.rule: "Host(`secretlab.kreio.tech`)"
+      traefik.http.routers.kv.entrypoints: "websecure"
+      traefik.http.routers.kv.tls.certresolver: "letsencrypt"
+      traefik.http.services.kv.loadbalancer.server.port: "80"
+      # No redirect middleware here. The "web" entrypoint already redirects to
+      # "websecure" globally. A second redirect creates a loop.
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+    # List form, not a string. "--save ''" must reach Redis as an empty
+    # argument, and string splitting makes that fragile.
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
+      # Redis grows without a cap. On a small VPS that kills PostgreSQL first.
+      - --maxmemory
+      - 128mb
+      # Every key we store carries a TTL, so this matches volatile-lru here.
+      - --maxmemory-policy
+      - allkeys-lru
+      # Cache entries and rate-limit counters are disposable. Persistence off
+      # saves disk writes.
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+
+    networks:
+      - internal
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  # Created by the Traefik host setup, not by this file.
+  traefik-public:
+    external: true
+  internal:
+    driver: bridge

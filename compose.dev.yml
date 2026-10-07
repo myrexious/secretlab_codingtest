@@ -1,0 +1,83 @@
+# Local development stack. Self-contained: it brings its own PostgreSQL.
+#
+#   docker compose -f compose.dev.yml up -d        -> http://localhost:8088
+#   docker compose -f compose.dev.yml exec app php artisan migrate
+#   docker compose -f compose.dev.yml exec app php artisan test
+#
+# This is a standalone file, not an overlay on compose.yml. Compose merging is
+# additive, so an overlay could never remove the production Traefik network or
+# drop a service.
+name: secretlab-kv-dev
+
+services:
+  app:
+    build:
+      context: .
+      target: dev
+    image: secretlab-kv:dev
+    restart: unless-stopped
+    # No env_file here, deliberately. Compose bakes env_file values in at
+    # container start, so an edit to .env would need a restart to take effect.
+    # The source mount below means Laravel reads .env itself, on every request.
+    ports:
+      - "127.0.0.1:8088:80"
+    volumes:
+      - .:/app
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Mirrors the VPS version. Tests must run against real PostgreSQL: SQLite has
+  # no clock_timestamp() and different json semantics, so a SQLite suite would
+  # pass while production breaks.
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: kvstore
+      POSTGRES_USER: kvstore
+      POSTGRES_PASSWORD: kvstore
+    ports:
+      # 5432 falls inside a Windows reserved port range, so the host side is 15432.
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Creates the kvstore_test database on first start of an empty volume.
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kvstore -d kvstore"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:-devpassword}
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-devpassword}", "--no-auth-warning", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+
+networks:
+  internal:
+    driver: bridge

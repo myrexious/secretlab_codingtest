@@ -1,0 +1,362 @@
+openapi: 3.1.0
+
+info:
+  title: Secretlab Key-Value Store
+  version: "1.0.0"
+  description: |
+    A **version-controlled** key-value store.
+
+    The store is append-only. A write never overwrites a value; it appends a new
+    version. So "the latest value" and "the value at time T" are the same query
+    with a different upper bound.
+
+    ### Timestamps
+    Every timestamp is a decimal UNIX timestamp in seconds, UTC, with microsecond
+    precision — for example `1440568980.123456`.
+
+    Microseconds are not decoration. Two writes to one key 10 ms apart would
+    render identically at whole-second precision, and no query could then address
+    the earlier one. A unique constraint on `(key, recorded_at)` guarantees that
+    one key never holds two records at one timestamp.
+
+    ### Values
+    A value is any JSON document: an object, array, string, number, boolean, or
+    `null`. Types are preserved exactly. Send `42` and you get `42` back, not
+    `"42"`.
+
+    Because `null` is a storable value, a missing record is reported as **404**
+    rather than as `"value": null`. The two are different things.
+
+    ### Authentication
+    Optional. Without a key you are rate-limited by IP address. With a valid
+    `X-API-Key` you get a higher allowance. An unknown key is rejected with 401
+    rather than silently downgraded, so a misconfigured client fails loudly.
+
+    A public demo key is published in the repository README. Click **Authorize**
+    above and paste it in.
+
+servers:
+  - url: https://secretlab.kreio.tech
+    description: Production
+  - url: http://localhost:8088
+    description: Local development (compose.dev.yml)
+
+tags:
+  - name: Write
+  - name: Read
+  - name: Service
+
+security:
+  - ApiKeyAuth: []
+  - {}
+
+paths:
+  /kv-value/data:
+    post:
+      tags: [Write]
+      summary: Store a value
+      description: Appends a new version. The server assigns the timestamp.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Pair"
+            examples:
+              object:
+                summary: A JSON object
+                value: { key: "mykey", value: { "colour": "blue", "size": 3 } }
+              scalar:
+                summary: A bare number
+                value: { key: "counter", value: 42 }
+              null_value:
+                summary: A literal null, which is a real stored value
+                value: { key: "maybe", value: null }
+      responses:
+        "201":
+          description: Stored
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Record" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /kv-value/bulk-create:
+    post:
+      tags: [Write]
+      summary: Store many values at once
+      description: |
+        All-or-nothing: one transaction, so a single invalid pair rejects the
+        whole request and writes nothing.
+
+        The same key may not appear twice in one request. Two records for one key
+        would need two timestamps, and which one counted as "latest" would come
+        down to row order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pairs]
+              properties:
+                pairs:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items: { $ref: "#/components/schemas/Pair" }
+            example:
+              pairs:
+                - { key: "alpha", value: 1 }
+                - { key: "beta", value: { "nested": true } }
+      responses:
+        "201":
+          description: All pairs stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Record" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /kv-value/data/{key}:
+    get:
+      tags: [Read]
+      summary: Read the latest value, or the value at a past time
+      parameters:
+        - $ref: "#/components/parameters/Key"
+        - name: timestamp
+          in: query
+          required: false
+          description: |
+            Return the newest record at or **before** this time. The bound is
+            inclusive.
+
+            A timestamp before the key's first write returns 404. A timestamp in
+            the future returns the latest record.
+          schema:
+            type: string
+            pattern: '^\d{1,12}(\.\d{1,6})?$'
+          example: "1440568980.123456"
+        - name: direct
+          in: query
+          required: false
+          description: |
+            Skip the cache and read PostgreSQL directly.
+
+            Normally the latest-value read is cached for 60 seconds, and any
+            write to the key evicts that entry immediately. This flag exists for
+            the case where something changed the database outside this API.
+
+            It has no effect alongside `timestamp`: a past value is immutable, so
+            it is never cached.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Record" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /kv-value/history/{key}:
+    get:
+      tags: [Read]
+      summary: Every version of one key, newest first
+      parameters:
+        - $ref: "#/components/parameters/Key"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of versions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /kv-value/get-all-keys:
+    get:
+      tags: [Read]
+      summary: Every key with its current value
+      description: |
+        The current state of the store: one entry per key, holding that key's
+        latest value. Use `/kv-value/history/{key}` for a key's past versions.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of keys
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /health:
+    get:
+      tags: [Service]
+      summary: Liveness probe
+      description: |
+        Checks PostgreSQL and Redis. Answers 503 if either is down, so a
+        half-broken container cannot report itself healthy.
+
+        Never rate-limited, so monitoring cannot lock itself out.
+      security: []
+      responses:
+        "200":
+          description: Everything is up
+          content:
+            application/json:
+              example: { status: "ok", checks: { database: "ok", redis: "ok" } }
+        "503":
+          description: A dependency is down
+          content:
+            application/json:
+              example: { status: "degraded", checks: { database: "fail", redis: "ok" } }
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Optional. Without it you are rate-limited by IP address.
+
+  parameters:
+    Key:
+      name: key
+      in: path
+      required: true
+      description: |
+        Letters, digits, and the characters `.` `_` `:` `-`, up to 255
+        characters. A key may not contain `/`, because the read path could not
+        then address it.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._:-]+$'
+        maxLength: 255
+      example: mykey
+
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        Pass the `next_cursor` from the previous page, unchanged. Cursors are
+        opaque; do not build one by hand.
+
+        Cursor paging rather than offset paging, so a page stays correct even
+        while new writes land mid-scan.
+      schema: { type: string }
+
+  schemas:
+    Pair:
+      type: object
+      required: [key, value]
+      properties:
+        key:
+          type: string
+          pattern: '^[A-Za-z0-9._:-]+$'
+          maxLength: 255
+        value:
+          description: >
+            Any JSON document. Up to 256 KiB once encoded. `null` is a valid
+            value and is stored as such.
+
+    Record:
+      type: object
+      required: [key, value, timestamp]
+      properties:
+        key:
+          type: string
+          example: mykey
+        value:
+          description: The stored document, with its original JSON type.
+        timestamp:
+          type: number
+          description: Decimal UNIX seconds, UTC, microsecond precision.
+          example: 1440568980.123456
+
+    Page:
+      type: object
+      required: [data, next_cursor]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Record" }
+        next_cursor:
+          type: [string, "null"]
+          description: Pass to `cursor` for the next page. `null` on the last page.
+
+    Error:
+      type: object
+      properties:
+        message: { type: string }
+
+    ValidationErrorBody:
+      type: object
+      properties:
+        message: { type: string }
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+
+  responses:
+    NotFound:
+      description: |
+        No matching record. The message distinguishes a key that was never
+        written from a key that held no value yet at the requested time.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            message: 'No value has ever been stored for the key "nosuchkey".'
+
+    Unauthorized:
+      description: The X-API-Key header was sent but is not a known, active key.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+    ValidationError:
+      description: The request did not pass validation.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ValidationErrorBody" }
+
+    RateLimited:
+      description: |
+        Too many requests. `Retry-After`, `X-RateLimit-Limit` and
+        `X-RateLimit-Remaining` are all present.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+        X-RateLimit-Limit:
+          schema: { type: integer }
+        X-RateLimit-Remaining:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
