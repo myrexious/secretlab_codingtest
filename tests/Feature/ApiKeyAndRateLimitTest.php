@@ -115,6 +115,25 @@ describe('rate limiting', function () {
         getJson('/kv-value/get-all-keys')->assertOk();
     });
 
+    it('buckets by the real client IP behind Cloudflare', function () {
+        config(['kv.rate_limit.anonymous' => 1]);
+
+        // Two different edge addresses, one real client: one bucket.
+        getJson('/kv-value/get-all-keys', ['X-Forwarded-For' => '104.16.0.1', 'CF-Connecting-IP' => '203.0.113.7'])->assertOk();
+        getJson('/kv-value/get-all-keys', ['X-Forwarded-For' => '172.67.1.1', 'CF-Connecting-IP' => '203.0.113.7'])->assertStatus(429);
+
+        // A different real client gets its own bucket.
+        getJson('/kv-value/get-all-keys', ['X-Forwarded-For' => '104.16.0.1', 'CF-Connecting-IP' => '203.0.113.8'])->assertOk();
+    });
+
+    it('ignores CF-Connecting-IP from a peer that is not Cloudflare', function () {
+        config(['kv.rate_limit.anonymous' => 1]);
+
+        // A direct caller cannot dodge the limit by rotating a forged header.
+        getJson('/kv-value/get-all-keys', ['X-Forwarded-For' => '198.51.100.9', 'CF-Connecting-IP' => '203.0.113.1'])->assertOk();
+        getJson('/kv-value/get-all-keys', ['X-Forwarded-For' => '198.51.100.9', 'CF-Connecting-IP' => '203.0.113.2'])->assertStatus(429);
+    });
+
     it('never rate limits the health endpoint', function () {
         // Monitoring must not be able to lock itself out.
         foreach (range(1, 5) as $ignored) {

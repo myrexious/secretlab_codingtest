@@ -7,6 +7,7 @@ use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
+use Symfony\Component\HttpFoundation\IpUtils;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -37,7 +38,24 @@ class AppServiceProvider extends ServiceProvider
                 return Limit::perMinute($client->rate_limit_per_minute)->by('client:'.$client->id);
             }
 
-            return Limit::perMinute((int) config('kv.rate_limit.anonymous'))->by('ip:'.$request->ip());
+            return Limit::perMinute((int) config('kv.rate_limit.anonymous'))->by('ip:'.$this->clientIp($request));
         });
+    }
+
+    /**
+     * Behind Cloudflare, $request->ip() is the edge address, which changes per
+     * request and gives every call a fresh bucket. Trust CF-Connecting-IP only
+     * when the peer really is Cloudflare, so a direct caller cannot forge it.
+     */
+    private function clientIp(Request $request): string
+    {
+        $peer = (string) $request->ip();
+        $real = (string) $request->header('CF-Connecting-IP');
+
+        if ($real !== '' && filter_var($real, FILTER_VALIDATE_IP) && IpUtils::checkIp($peer, config('kv.cloudflare_ranges'))) {
+            return $real;
+        }
+
+        return $peer;
     }
 }
