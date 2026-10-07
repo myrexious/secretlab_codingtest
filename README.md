@@ -168,10 +168,15 @@ writes wrongly because two machines disagree about the time. The column default
 is `clock_timestamp()` and not `now()` — `now()` returns the *transaction* start
 time and stays frozen, which would make every row of a bulk insert collide.
 
-**Timestamps are decimal, with microseconds.** Two writes to one key 10 ms apart
-would render identically at whole-second precision, and no query could then
-reach the earlier one. A `UNIQUE (key, recorded_at)` constraint guarantees one
-key never holds two records at one timestamp.
+**Timestamps are decimal UNIX seconds, with microseconds.** The PRD example
+shows a whole-second UNIX timestamp (`1440568980`). This service accepts that
+form on input, and also accepts a decimal. It always *returns* a decimal
+(`1440568980.123456`). The reason is correctness, not decoration: two writes to
+one key 10 ms apart would render identically at whole-second precision, and no
+query could then reach the earlier one. A `UNIQUE (key, recorded_at)` constraint
+guarantees one key never holds two records at one timestamp. The value is still
+a UNIX timestamp in seconds, UTC — the exercise's stated contract — with the
+sub-second part exposed so every version stays addressable.
 
 **A miss is 404, never `"value": null`.** `null` is a storable value, so
 reporting absence as a null value would make the two indistinguishable.

@@ -11,8 +11,10 @@ info:
     with a different upper bound.
 
     ### Timestamps
-    Every timestamp is a decimal UNIX timestamp in seconds, UTC, with microsecond
-    precision — for example `1440568980.123456`.
+    Every timestamp is a UNIX timestamp in seconds, UTC. Reads **return** a
+    decimal with microsecond precision — for example `1440568980.123456`. The
+    `?timestamp=` query accepts either a whole number (`1440568980`) or a
+    decimal, so the plain UNIX-second form from the brief works unchanged.
 
     Microseconds are not decoration. Two writes to one key 10 ms apart would
     render identically at whole-second precision, and no query could then address
