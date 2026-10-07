@@ -1,6 +1,8 @@
 .git
 .github
 .claude
+.idea
+.vscode
 .tmp
 plans
 vendor
@@ -15,3 +17,4 @@ Dockerfile
 *.md
 storage/logs/*
 storage/framework/cache/data/*
+storage/framework/views/*
