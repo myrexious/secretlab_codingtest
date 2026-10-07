@@ -41,6 +41,29 @@ return [
         '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
     ],
 
+    /*
+    | Known crawlers and bots, matched as lowercase substrings of the
+    | User-Agent. Deliberately NOT a generic list: curl, Postman, wget and an
+    | empty agent are real API clients and must pass. See BlockCrawlers.
+    */
+    'blocked_agents' => [
+        // Search engines
+        'googlebot', 'bingbot', 'slurp', 'duckduckbot', 'baiduspider',
+        'yandexbot', 'sogou', 'exabot', 'facebot', 'ia_archiver',
+        // Social and link preview
+        'facebookexternalhit', 'twitterbot', 'linkedinbot', 'embedly',
+        'quora link preview', 'pinterest', 'slackbot', 'telegrambot',
+        'whatsapp', 'discordbot',
+        // SEO and scraping tools
+        'ahrefsbot', 'semrushbot', 'mj12bot', 'dotbot', 'petalbot',
+        'bytespider', 'dataforseo', 'blexbot', 'serpstatbot',
+        // AI scrapers
+        'gptbot', 'chatgpt-user', 'ccbot', 'anthropic-ai', 'claudebot',
+        'google-extended', 'perplexitybot', 'amazonbot', 'applebot',
+        // Generic self-identifying crawlers
+        'crawler', 'spider', 'scrapy',
+    ],
+
     'rate_limit' => [
         'anonymous' => (int) env('KV_RATE_LIMIT_ANONYMOUS', 120),
         'client' => (int) env('KV_RATE_LIMIT_CLIENT', 600),

@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Middleware\BlockCrawlers;
 use App\Http\Middleware\ResolveApiClient;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -21,6 +22,8 @@ return Application::configure(basePath: dirname(__DIR__))
         // keys its counter on the client that middleware resolves. Reverse them
         // and every request would be limited by IP address.
         $middleware->api(prepend: [
+            // First line: turn away declared crawlers before any other work.
+            BlockCrawlers::class,
             ResolveApiClient::class,
             'throttle:api',
         ]);
