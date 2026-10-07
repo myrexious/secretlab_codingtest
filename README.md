@@ -115,7 +115,7 @@ docker compose -f compose.dev.yml exec app ./vendor/bin/pest --coverage
 docker compose -f compose.dev.yml exec app ./vendor/bin/pint
 ```
 
-140 tests, 100% line coverage of `app/`.
+157 tests, 100% line coverage of `app/`.
 
 ### Mint an API key
 
