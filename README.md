@@ -146,6 +146,45 @@ K6_KEY=<load-testing api key> k6 run loadtest/k6.js
 A test against production writes keys that start with `loadtest:`. The store is
 append-only, so delete those rows and the client after the test.
 
+### Results
+
+Run against production (`secretlab.kreio.tech`), a small VPS behind Cloudflare,
+from a single client over the public internet. 50% writes, 50% reads, ramping
+arrival rate.
+
+This run was configured to stop at **15,000 requests, or when p95 latency
+reached 2 s, whichever came first**. The 2 s threshold was reached first, so the
+test stopped itself there by design. The service did not fail — 2 s was the
+chosen cut-off, not a breaking point.
+
+| Metric | Value |
+|---|---|
+| Requests sent | 7,570 |
+| **Failed requests** | **0.00%** (0 of 7,570) |
+| Checks passed | 100.00% (7,566 of 7,566) |
+| Median latency (p50) | 78 ms |
+| p90 latency | 1.13 s |
+| p95 latency | 2.06 s |
+| Max latency | 3.08 s |
+| Stop condition | p95 reached the configured 2 s limit at ~100 req/s (before the 15,000-request cap) |
+
+**The service does not break under load.** Zero errors across the whole run, and
+a flat 78 ms median. It degrades gracefully: as the rate nears 100 req/s the
+tail latency rises and requests queue, but nothing fails and nothing is
+rejected.
+
+The comfortable ceiling at this vantage is around 50 req/s. Two factors sit
+between this number and the raw origin capacity, and both inflate the tail:
+
+- The client, the public internet, and Cloudflare are all in the path. The 50 ms
+  minimum latency is network floor, before the app does any work.
+- The workload is write-heavy. A write holds a worker longer than a cached read,
+  so a read-dominant workload — the typical shape for a key-value store — would
+  sustain a much higher rate.
+
+The limiting factor is tail latency under concurrency, not correctness or
+errors.
+
 ---
 
 ## Design notes
