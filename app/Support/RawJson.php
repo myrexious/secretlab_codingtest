@@ -43,6 +43,26 @@ final class RawJson
             .'}';
     }
 
+    /**
+     * One editor-only history envelope. Adds recorded_at (the audit/tie-break
+     * instant, to tell apart two rows that share one timestamp) and cancelled
+     * (whether this row's slot was withdrawn). Never sent to a customer.
+     */
+    public static function editorEnvelope(
+        string $key,
+        string $rawValue,
+        string $timestamp,
+        string $recordedAt,
+        bool $cancelled,
+    ): string {
+        return '{"key":'.json_encode($key, self::ENCODE_FLAGS)
+            .',"value":'.$rawValue
+            .',"timestamp":'.$timestamp
+            .',"recorded_at":'.$recordedAt
+            .',"cancelled":'.($cancelled ? 'true' : 'false')
+            .'}';
+    }
+
     /** An unpaginated set of envelopes, used by bulk create. */
     public static function collection(array $envelopes): string
     {

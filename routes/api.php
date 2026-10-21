@@ -21,6 +21,9 @@ Route::prefix('kv-value')->group(function () {
     Route::get('/data/{key}', [KvValueController::class, 'show'])
         ->where('key', config('kv.key_pattern'));
 
+    Route::post('/data/{key}/cancel', [KvValueController::class, 'cancel'])
+        ->where('key', config('kv.key_pattern'));
+
     Route::get('/history/{key}', [KvValueController::class, 'history'])
         ->where('key', config('kv.key_pattern'));
 });

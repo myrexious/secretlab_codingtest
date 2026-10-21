@@ -20,6 +20,7 @@ class BulkCreateRequest extends FormRequest
             // guessing.
             'pairs.*.key' => [...$this->keyRules(), 'distinct'],
             'pairs.*.value' => $this->valueRules(),
+            'pairs.*.effective_at' => $this->effectiveAtRules(),
         ];
     }
 
@@ -34,6 +35,8 @@ class BulkCreateRequest extends FormRequest
             'pairs.*.key.distinct' => 'The key ":input" appears more than once in this request. '
                 .'One request may not write the same key twice.',
             'pairs.*.value.present' => 'Every pair needs a value field. Send "value": null to store a JSON null.',
+            'pairs.*.effective_at.regex' => 'The effective_at ":input" is not a UNIX timestamp. Use seconds '
+                .'since the epoch, UTC, with up to six decimal places, for example 1440568980.123456.',
         ];
     }
 }

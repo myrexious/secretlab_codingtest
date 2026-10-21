@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Middleware\ResolveApiClient;
 use App\Http\Requests\BulkCreateRequest;
 use App\Http\Requests\CreateRecordRequest;
 use App\Services\RecordStore;
@@ -14,9 +15,6 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 class KvValueController extends Controller
 {
-    /** A decimal UNIX timestamp in seconds. Whole or fractional, never signed. */
-    private const EPOCH_PATTERN = '/^\d{1,12}(\.\d{1,6})?$/';
-
     public function __construct(private readonly RecordStore $store) {}
 
     public function store(CreateRecordRequest $request): Response
@@ -25,6 +23,7 @@ class KvValueController extends Controller
             $this->store->create(
                 $request->validated('key'),
                 RawJson::encodeForStorage($this->shapedValue($request, 'value')),
+                $request->validated('effective_at'),
             ),
             201,
         );
@@ -38,6 +37,7 @@ class KvValueController extends Controller
             $pairs[] = [
                 'key' => $pair['key'],
                 'value' => RawJson::encodeForStorage($this->shapedValue($request, "pairs.{$index}.value")),
+                'effective_at' => $pair['effective_at'] ?? null,
             ];
         }
 
@@ -47,12 +47,14 @@ class KvValueController extends Controller
         );
     }
 
-    /** Latest record, or the record as of ?timestamp=. */
+    /** Live now, or as of ?timestamp=. A customer's view of time never exceeds now(). */
     public function show(Request $request, string $key): Response
     {
+        $editor = $this->isEditor($request);
+
         $request->validate(
             [
-                'timestamp' => ['nullable', 'regex:'.self::EPOCH_PATTERN],
+                'timestamp' => ['nullable', 'regex:/^'.config('kv.epoch_pattern').'$/'],
                 'direct' => ['nullable', 'in:true,false,1,0'],
             ],
             [
@@ -67,17 +69,15 @@ class KvValueController extends Controller
         if ($timestamp !== null) {
             // An as-of read is never cached: the answer is immutable, so the
             // entry would expire long before it was ever reused.
-            $envelope = $this->store->asOf($key, $timestamp);
+            $envelope = $editor ? $this->store->liveAt($key, $timestamp) : $this->store->liveAtCapped($key, $timestamp);
         } else {
             $direct = filter_var($request->query('direct', 'false'), FILTER_VALIDATE_BOOL);
 
-            $envelope = $direct
-                ? $this->store->latest($key)
-                : $this->store->latestCached($key);
+            $envelope = $direct ? $this->store->liveNow($key) : $this->store->latestCached($key);
         }
 
         if ($envelope === null) {
-            $this->notFound($key, $timestamp);
+            $this->notFound($key, $timestamp, $editor);
         }
 
         return RawJson::response($envelope);
@@ -85,14 +85,16 @@ class KvValueController extends Controller
 
     public function history(Request $request, string $key): Response
     {
-        [$limit, $cursor] = $this->pagination($request, self::EPOCH_PATTERN);
+        $editor = $this->isEditor($request);
 
-        [$envelopes, $next] = $this->store->history($key, $limit, $cursor);
+        [$limit, $cursor] = $this->pagination($request, '/^'.config('kv.epoch_pattern').'$/');
+
+        [$envelopes, $next] = $this->store->history($key, $limit, $cursor, $editor);
 
         // An empty first page means the key was never written. An empty later
         // page just means the caller walked off the end, which is not an error.
         if ($envelopes === [] && $cursor === null) {
-            $this->notFound($key, null);
+            $this->notFound($key, null, $editor);
         }
 
         return RawJson::response(RawJson::page($envelopes, $next));
@@ -100,11 +102,54 @@ class KvValueController extends Controller
 
     public function allKeys(Request $request): Response
     {
-        [$limit, $cursor] = $this->pagination($request, '/^'.config('kv.key_pattern').'$/');
+        $editor = $this->isEditor($request);
 
-        [$envelopes, $next] = $this->store->allKeys($limit, $cursor);
+        $request->validate(['timestamp' => ['nullable', 'regex:/^'.config('kv.epoch_pattern').'$/']]);
+        $explicitTimestamp = $request->query('timestamp');
+
+        $cursorPattern = '/^'.config('kv.key_pattern').'\|'.config('kv.epoch_pattern').'$/';
+        [$limit, $cursor] = $this->pagination($request, $cursorPattern);
+
+        [$keyCursor, $cursorEpoch] = $cursor === null ? [null, null] : explode('|', $cursor, 2);
+
+        // Precedence: an explicit ?timestamp= always wins for this page (and
+        // is carried forward into its own next_cursor). Otherwise a walk in
+        // progress reuses the instant its first page already resolved, so
+        // every page of one walk stays consistent even if the caller never
+        // repeats the parameter. A fresh walk with neither resolves "now"
+        // once, by the database's own clock.
+        $capEpoch = $explicitTimestamp ?? $cursorEpoch ?? $this->store->nowEpoch();
+
+        [$envelopes, $next] = $this->store->allKeys($limit, $keyCursor, $capEpoch, $editor);
 
         return RawJson::response(RawJson::page($envelopes, $next));
+    }
+
+    /** Withdraw whatever is scheduled for $key at the given effective_at, before it ever goes live. */
+    public function cancel(Request $request, string $key): Response
+    {
+        abort_if(! $this->isEditor($request), 401,
+            'Cancelling a schedule requires a valid X-API-Key.');
+
+        $request->validate(
+            ['effective_at' => ['required', 'regex:/^'.config('kv.epoch_pattern').'$/']],
+            ['effective_at.regex' => 'The effective_at ":input" is not a UNIX timestamp.'],
+        );
+
+        $epoch = $request->input('effective_at');
+
+        abort_if(! $this->store->isFutureEpoch($epoch), 422,
+            'That time has already passed. Only a still-future schedule may be cancelled.');
+
+        abort_if(! $this->store->isScheduledAt($key, $epoch), 404,
+            sprintf('Nothing is scheduled for key "%s" at that time.', $key));
+
+        return RawJson::response($this->store->cancel($key, $epoch));
+    }
+
+    private function isEditor(Request $request): bool
+    {
+        return $request->attributes->get(ResolveApiClient::ATTRIBUTE) !== null;
     }
 
     /**
@@ -131,12 +176,13 @@ class KvValueController extends Controller
 
     /**
      * Both misses answer 404, but the message tells them apart: a key that was
-     * never written, against a key that held nothing yet at that time.
+     * never written (or never visible to this caller), against a key that
+     * held nothing a caller of this kind could see at that time.
      */
-    private function notFound(string $key, ?string $timestamp): never
+    private function notFound(string $key, ?string $timestamp, bool $editor): never
     {
         throw new NotFoundHttpException(
-            $timestamp !== null && $this->store->exists($key)
+            $timestamp !== null && $this->store->exists($key, $editor)
                 ? sprintf('The key "%s" exists, but no value was stored at or before timestamp %s.', $key, $timestamp)
                 : sprintf('No value has ever been stored for the key "%s".', $key),
         );

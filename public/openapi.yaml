@@ -37,6 +37,19 @@ info:
     A public demo key is published in the repository README. Click **Authorize**
     above and paste it in.
 
+    ### Scheduling
+    `effective_at` on a write is optional and schedules a value to take effect
+    at a future UTC instant instead of immediately, with no cron or worker: the
+    database re-evaluates "what's live" on every read. A later edit targeting
+    the same `effective_at` supersedes an earlier one. `POST
+    .../cancel` withdraws a still-future schedule before it ever goes live.
+
+    An **anonymous** caller's view of time never exceeds `now()`: a scheduled
+    or cancelled value is never visible early, not even by guessing a future
+    `?timestamp=`. An **authenticated** caller (`X-API-Key`) may preview a
+    future `timestamp` and sees every row — scheduled and cancelled — in
+    `/history/{key}`, each tagged with `cancelled` and its own `recorded_at`.
+
 servers:
   - url: https://secretlab.kreio.tech
     description: Production
@@ -74,6 +87,9 @@ paths:
               null_value:
                 summary: A literal null, which is a real stored value
                 value: { key: "maybe", value: null }
+              scheduled:
+                summary: Scheduled for a future UTC instant
+                value: { key: "payment.card.transaction_notice", value: "Scheduled maintenance begins at 18:00 UTC.", effective_at: 1440597600 }
       responses:
         "201":
           description: Stored
@@ -171,10 +187,49 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
+  /kv-value/data/{key}/cancel:
+    post:
+      tags: [Write]
+      summary: Cancel a still-future schedule
+      description: |
+        Requires a valid `X-API-Key`. Withdraws every value scheduled for this
+        key at exactly `effective_at` — never deleted, just permanently
+        excluded from ever being live. Only a time that is still in the
+        future may be cancelled. Calling it twice for the same slot is a
+        no-op, not an error.
+      parameters:
+        - $ref: "#/components/parameters/Key"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [effective_at]
+              properties:
+                effective_at:
+                  type: string
+                  pattern: '^\d{1,12}(\.\d{1,6})?$'
+            example: { effective_at: 1440597600 }
+      responses:
+        "200":
+          description: Cancelled (or already was)
+          content:
+            application/json:
+              example: { key: "payment.card.transaction_notice", effective_at: 1440597600, cancelled_at: 1440584430.654321 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
   /kv-value/history/{key}:
     get:
       tags: [Read]
       summary: Every version of one key, newest first
+      description: |
+        Anonymous: only versions that were, and remain, actually visible —
+        never-live schedules and cancelled slots are omitted. Authenticated:
+        every row, each tagged with `cancelled` and its own `recorded_at`.
       parameters:
         - $ref: "#/components/parameters/Key"
         - $ref: "#/components/parameters/Limit"
@@ -195,8 +250,20 @@ paths:
       summary: Every key with its current value
       description: |
         The current state of the store: one entry per key, holding that key's
-        latest value. Use `/kv-value/history/{key}` for a key's past versions.
+        live value — now, or at `timestamp` if given. Use
+        `/kv-value/history/{key}` for a key's past versions.
+
+        Stable while paginating: the instant a walk resolves (explicit
+        `timestamp`, or "now" on the first page) travels inside `next_cursor`,
+        so later pages of the same walk see the same snapshot even if the
+        caller never repeats the parameter.
       parameters:
+        - name: timestamp
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: '^\d{1,12}(\.\d{1,6})?$'
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Cursor"
       responses:
@@ -281,6 +348,14 @@ components:
           description: >
             Any JSON document. Up to 256 KiB once encoded. `null` is a valid
             value and is stored as such.
+        effective_at:
+          type: string
+          description: >
+            Optional. A decimal UNIX timestamp, strictly in the future, to
+            take effect then instead of immediately. Omit it for today's
+            behaviour. A later write targeting the same instant supersedes
+            an earlier one.
+          pattern: '^\d{1,12}(\.\d{1,6})?$'
 
     Record:
       type: object
@@ -293,8 +368,16 @@ components:
           description: The stored document, with its original JSON type.
         timestamp:
           type: number
-          description: Decimal UNIX seconds, UTC, microsecond precision.
+          description: >
+            Decimal UNIX seconds, UTC, microsecond precision. The value's
+            effective time, not necessarily when it was written.
           example: 1440568980.123456
+        recorded_at:
+          type: number
+          description: Authenticated `/history` only. When this row was written.
+        cancelled:
+          type: boolean
+          description: Authenticated `/history` only. Whether this row's slot was withdrawn.
 
     Page:
       type: object

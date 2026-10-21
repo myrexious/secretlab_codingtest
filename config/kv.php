@@ -9,6 +9,13 @@ return [
     'key_pattern' => '[A-Za-z0-9._:-]+',
     'key_max_length' => 255,
 
+    /*
+    | A decimal UNIX timestamp in seconds, whole or fractional, never signed.
+    | Shared by every place a timestamp crosses the wire: ?timestamp=,
+    | effective_at on create, cursors, and the cancel endpoint.
+    */
+    'epoch_pattern' => '\d{1,12}(\.\d{1,6})?',
+
     'value_max_bytes' => 256 * 1024,
     'bulk_max_pairs' => 50,
 

@@ -1,0 +1,3 @@
+# Separate `effective_at` from `recorded_at`
+
+Scheduling needs a client-settable "when this takes effect" instant, but `recorded_at` must stay DB-assigned and collision-free (it is the tie-break and the audit ledger order; the unique index and every existing query depend on that). Two edits can legitimately target the identical go-live instant (two schedules both set for 18:00:00), which a single shared column cannot represent without losing one of those guarantees. `effective_at` is a second column: ties are allowed and expected on it, and `recorded_at` breaks them. Every read that used to filter/order on `recorded_at` for "what's live" now does so on `effective_at`, with `recorded_at` as the tiebreaker.

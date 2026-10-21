@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Concerns;
 
+use App\Services\RecordStore;
 use App\Support\RawJson;
 use Closure;
 
@@ -30,6 +31,32 @@ trait RecordRules
         // "present", not "required": null is a storable value, and "required"
         // would reject it.
         return ['present', $this->valueSizeRule()];
+    }
+
+    /**
+     * @return list<mixed>
+     *
+     * Optional: omitting it keeps today's "immediate" behaviour unchanged.
+     * When given, it must be strictly in the future -- a backdated value
+     * would retroactively change what an already-answered ?timestamp= query
+     * returns, breaking the documented "a past value is immutable" promise.
+     *
+     * "bail" matters here: the future-check closure casts the value to
+     * ::numeric in SQL, so it must never run on a value the regex already
+     * rejected, or a garbage string would 500 instead of failing cleanly.
+     */
+    protected function effectiveAtRules(): array
+    {
+        return ['bail', 'nullable', 'regex:/^'.config('kv.epoch_pattern').'$/', $this->effectiveAtFutureRule()];
+    }
+
+    protected function effectiveAtFutureRule(): Closure
+    {
+        return function (string $attribute, mixed $value, Closure $fail): void {
+            if (! app(RecordStore::class)->isFutureEpoch((string) $value)) {
+                $fail("The {$attribute} must be a time in the future. To take effect immediately, omit it.");
+            }
+        };
     }
 
     /**
