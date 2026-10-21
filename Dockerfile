@@ -37,6 +37,11 @@ COPY . .
 RUN composer dump-autoload --optimize --no-dev --no-interaction \
     && chown -R www-data:www-data storage bootstrap/cache
 
+# The Caddyfile adds a MAINTENANCE=true switch that serves a static page and
+# never starts PHP. See the comments in the file.
+COPY docker/Caddyfile /etc/frankenphp/Caddyfile
+COPY docker/maintenance /app/maintenance
+
 # file_get_contents returns false on a 4xx or 5xx response, so this needs no
 # curl binary in the image.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

@@ -1,0 +1,44 @@
+# Replaces the FrankenPHP default Caddyfile. The only change is the maintenance
+# switch. When MAINTENANCE=true in the container environment, Caddy answers
+# every request itself and never starts PHP, so a PHP core flaw is not reachable.
+# Laravel's "artisan down" is not enough: it runs inside PHP.
+{
+	skip_install_trust
+
+	{$CADDY_GLOBAL_OPTIONS}
+
+	frankenphp {
+		{$FRANKENPHP_CONFIG}
+	}
+}
+
+{$CADDY_EXTRA_CONFIG}
+
+{$SERVER_NAME:localhost} {
+	root {$SERVER_ROOT:public/}
+	@compressible not path /.well-known/mercure
+	encode @compressible zstd br gzip
+
+	@maintenance expression `{env.MAINTENANCE} == "true"`
+	handle @maintenance {
+		# The container healthcheck and the CI smoke test need a 200 here.
+		handle /health {
+			respond "ok" 200
+		}
+		handle {
+			header Retry-After 3600
+			root * /app/maintenance
+			rewrite * /maintenance.html
+			file_server {
+				status 503
+			}
+		}
+	}
+
+	handle {
+		{$CADDY_SERVER_EXTRA_DIRECTIVES}
+		php_server
+	}
+}
+
+import Caddyfile.d/*.caddyfile
